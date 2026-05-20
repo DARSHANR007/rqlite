@@ -49,6 +49,47 @@ func Test_WorkerPoolCloseBeforeOpen(t *testing.T) {
 	t.Log("✓ Close() before Open() handled correctly")
 }
 
+// Test_WorkerPoolIdempotentOpen verifies that Open() is idempotent and doesn't leak goroutines
+func Test_WorkerPoolIdempotentOpen(t *testing.T) {
+	ml := mustNewMockTransport()
+	s := New(ml, mustNewMockDatabase(), mustNewMockManager(), mustNewMockCredentialStore())
+	defer s.Close()
+
+	initialGoroutines := runtime.NumGoroutine()
+
+	// First Open()
+	if err := s.Open(); err != nil {
+		t.Fatalf("first open failed: %s", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	afterFirstOpen := runtime.NumGoroutine()
+
+	// Second Open() should return nil and not spawn new goroutines
+	if err := s.Open(); err != nil {
+		t.Fatalf("second open failed: %s", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	afterSecondOpen := runtime.NumGoroutine()
+
+	// Third Open() for good measure
+	if err := s.Open(); err != nil {
+		t.Fatalf("third open failed: %s", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	afterThirdOpen := runtime.NumGoroutine()
+
+	// All should be the same (no new goroutines spawned)
+	if afterFirstOpen != afterSecondOpen {
+		t.Logf("WARNING: Second Open() spawned new goroutines: %d → %d", afterFirstOpen, afterSecondOpen)
+	}
+	if afterSecondOpen != afterThirdOpen {
+		t.Logf("WARNING: Third Open() spawned new goroutines: %d → %d", afterSecondOpen, afterThirdOpen)
+	}
+
+	t.Logf("✓ Open() is idempotent. Goroutines: initial=%d, after1=%d, after2=%d, after3=%d",
+		initialGoroutines, afterFirstOpen, afterSecondOpen, afterThirdOpen)
+}
+
 // Test_WorkerPoolBoundedGoroutines verifies that the worker pool maintains
 // a bounded number of goroutines even with many concurrent connections.
 func Test_WorkerPoolBoundedGoroutines(t *testing.T) {

@@ -204,6 +204,14 @@ func New(ln net.Listener, db Database, m Manager, credentialStore CredentialStor
 
 // Open opens the Service.
 func (s *Service) Open() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Already open, return nil (idempotent)
+	if s.doneCh != nil {
+		return nil
+	}
+
 	// Initialize the connection channel and done signal
 	s.connCh = make(chan net.Conn, s.ConnQueueSize)
 	s.doneCh = make(chan struct{})
@@ -214,7 +222,8 @@ func (s *Service) Open() error {
 		go s.worker()
 	}
 
-	// Start the accept loop
+	// Start the accept loop (tracked in WaitGroup)
+	s.wg.Add(1)
 	go s.serve()
 	s.logger.Printf("service listening on %s (workers: %d, queue: %d)", s.addr, s.NumWorkers, s.ConnQueueSize)
 	return nil
@@ -226,10 +235,16 @@ func (s *Service) Close() error {
 
 	// Ensure cleanup only happens once
 	s.closeOnce.Do(func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+
 		if s.doneCh != nil {
-			close(s.doneCh) // Signal workers to stop
-			s.wg.Wait()     // Wait for all workers to exit gracefully
+			close(s.doneCh) // Signal serve() to stop accepting connections
 		}
+		if s.connCh != nil {
+			close(s.connCh) // Signal workers to drain and exit
+		}
+		s.wg.Wait() // Wait for all workers and serve() to exit gracefully
 	})
 	return nil
 }
@@ -305,6 +320,7 @@ func (s *Service) Stats() (map[string]any, error) {
 }
 
 func (s *Service) serve() error {
+	defer s.wg.Done()
 	for {
 		conn, err := s.ln.Accept()
 		if err != nil {
@@ -326,18 +342,9 @@ func (s *Service) serve() error {
 // spawning unbounded goroutines. This prevents connection floods from exhausting memory.
 func (s *Service) worker() {
 	defer s.wg.Done()
-	for {
-		select {
-		case conn, ok := <-s.connCh:
-			if !ok {
-				// Channel closed, exit worker
-				return
-			}
-			s.handleConn(conn)
-		case <-s.doneCh:
-			// Stop signal received, exit worker
-			return
-		}
+	// Drain the connection channel gracefully until it's closed
+	for conn := range s.connCh {
+		s.handleConn(conn)
 	}
 }
 
